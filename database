@@ -1,0 +1,272 @@
+import sqlite3
+import os
+from typing import Optional, List
+from datetime import datetime
+
+
+class Database:
+    def __init__(self, db_path: str = "lelikbot.db"):
+        self.db_path = db_path
+        self._init_db()
+
+    def _get_conn(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        return conn
+
+    def _init_db(self):
+        with self._get_conn() as conn:
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS messages (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id      INTEGER NOT NULL,
+                    message_id   INTEGER NOT NULL,
+                    user_id      INTEGER NOT NULL,
+                    username     TEXT,
+                    display_name TEXT,
+                    msg_type     TEXT DEFAULT 'text',
+                    text         TEXT,
+                    file_id      TEXT,
+                    timestamp    TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS moments (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id      INTEGER NOT NULL,
+                    chat_id      INTEGER NOT NULL,
+                    username     TEXT,
+                    display_name TEXT,
+                    file_id      TEXT NOT NULL,
+                    media_type   TEXT NOT NULL,
+                    description  TEXT,
+                    ai_comment   TEXT,
+                    timestamp    TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS capsules (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id      INTEGER NOT NULL,
+                    chat_id      INTEGER NOT NULL,
+                    file_id      TEXT,
+                    media_type   TEXT,
+                    text         TEXT,
+                    open_at      TEXT NOT NULL,
+                    opened       INTEGER DEFAULT 0,
+                    timestamp    TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS user_streaks (
+                    user_id      INTEGER PRIMARY KEY,
+                    chat_id      INTEGER NOT NULL,
+                    streak_days  INTEGER DEFAULT 0,
+                    last_date    TEXT
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(chat_id);
+                CREATE INDEX IF NOT EXISTS idx_messages_user ON messages(user_id);
+                CREATE INDEX IF NOT EXISTS idx_moments_user  ON moments(user_id);
+                CREATE INDEX IF NOT EXISTS idx_capsules_user ON capsules(user_id);
+                CREATE INDEX IF NOT EXISTS idx_capsules_open ON capsules(open_at, opened);
+            """)
+
+    # ── Сообщения ──────────────────────────────────────────
+
+    def save_message(self, chat_id, message_id, user_id, username,
+                     display_name, msg_type, text, file_id, timestamp):
+        with self._get_conn() as conn:
+            conn.execute(
+                """INSERT INTO messages
+                   (chat_id, message_id, user_id, username, display_name,
+                    msg_type, text, file_id, timestamp)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                (chat_id, message_id, user_id, username, display_name,
+                 msg_type, text, file_id, timestamp)
+            )
+
+    def get_message_count(self, chat_id: int) -> int:
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS cnt FROM messages WHERE chat_id=?", (chat_id,)
+            ).fetchone()
+            return row["cnt"] if row else 0
+
+    def get_chat_stats(self, chat_id: int):
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                """SELECT display_name, COUNT(*) AS count
+                   FROM messages WHERE chat_id=?
+                   GROUP BY user_id ORDER BY count DESC LIMIT 10""",
+                (chat_id,)
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_user_message_count(self, user_id: int, chat_id: int) -> int:
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS cnt FROM messages WHERE user_id=? AND chat_id=?",
+                (user_id, chat_id)
+            ).fetchone()
+            return row["cnt"] if row else 0
+
+    def get_monthly_stats(self, chat_id: int, year: int, month: int):
+        with self._get_conn() as conn:
+            prefix = f"{year}-{month:02d}"
+            rows = conn.execute(
+                """SELECT display_name, COUNT(*) AS count
+                   FROM messages WHERE chat_id=? AND timestamp LIKE ?
+                   GROUP BY user_id ORDER BY count DESC LIMIT 5""",
+                (chat_id, prefix + "%")
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_user_months_active(self, user_id: int, chat_id: int) -> int:
+        with self._get_conn() as conn:
+            row = conn.execute(
+                """SELECT COUNT(DISTINCT substr(timestamp,1,7)) AS cnt
+                   FROM messages WHERE user_id=? AND chat_id=?""",
+                (user_id, chat_id)
+            ).fetchone()
+            return row["cnt"] if row else 0
+
+    # ── Моменты ────────────────────────────────────────────
+
+    def save_moment(self, user_id, chat_id, username, display_name,
+                    file_id, media_type, description, ai_comment, timestamp):
+        with self._get_conn() as conn:
+            conn.execute(
+                """INSERT INTO moments
+                   (user_id, chat_id, username, display_name, file_id,
+                    media_type, description, ai_comment, timestamp)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                (user_id, chat_id, username, display_name, file_id,
+                 media_type, description, ai_comment, timestamp)
+            )
+
+    def get_moments(self, user_id: int) -> List[dict]:
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM moments WHERE user_id=? ORDER BY timestamp ASC",
+                (user_id,)
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_moments_count(self, user_id: int) -> int:
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS cnt FROM moments WHERE user_id=?", (user_id,)
+            ).fetchone()
+            return row["cnt"] if row else 0
+
+    def get_random_old_moment(self, user_id: int) -> Optional[dict]:
+        with self._get_conn() as conn:
+            row = conn.execute(
+                """SELECT * FROM moments WHERE user_id=?
+                   AND timestamp < datetime('now', '-30 days')
+                   ORDER BY RANDOM() LIMIT 1""",
+                (user_id,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def get_monthly_moments(self, user_id: int, year: int, month: int) -> List[dict]:
+        with self._get_conn() as conn:
+            prefix = f"{year}-{month:02d}"
+            rows = conn.execute(
+                "SELECT * FROM moments WHERE user_id=? AND timestamp LIKE ? ORDER BY timestamp",
+                (user_id, prefix + "%")
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_all_users_with_moments(self) -> List[dict]:
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT user_id, chat_id, display_name FROM moments"
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def delete_moment(self, moment_id: int, user_id: int) -> bool:
+        with self._get_conn() as conn:
+            cur = conn.execute(
+                "DELETE FROM moments WHERE id=? AND user_id=?", (moment_id, user_id)
+            )
+            return cur.rowcount > 0
+
+    # ── Капсулы времени ────────────────────────────────────
+
+    def save_capsule(self, user_id, chat_id, file_id, media_type, text, open_at, timestamp):
+        with self._get_conn() as conn:
+            conn.execute(
+                """INSERT INTO capsules
+                   (user_id, chat_id, file_id, media_type, text, open_at, timestamp)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (user_id, chat_id, file_id, media_type, text, open_at, timestamp)
+            )
+
+    def get_due_capsules(self) -> List[dict]:
+        with self._get_conn() as conn:
+            now = datetime.now().isoformat()
+            rows = conn.execute(
+                "SELECT * FROM capsules WHERE open_at <= ? AND opened=0", (now,)
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def mark_capsule_opened(self, capsule_id: int):
+        with self._get_conn() as conn:
+            conn.execute("UPDATE capsules SET opened=1 WHERE id=?", (capsule_id,))
+
+    # ── Стрики ─────────────────────────────────────────────
+
+    def update_streak(self, user_id: int, chat_id: int) -> int:
+        today = datetime.now().date().isoformat()
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT streak_days, last_date FROM user_streaks WHERE user_id=?",
+                (user_id,)
+            ).fetchone()
+            if not row:
+                conn.execute(
+                    "INSERT INTO user_streaks (user_id, chat_id, streak_days, last_date) VALUES (?,?,1,?)",
+                    (user_id, chat_id, today)
+                )
+                return 1
+            last = row["last_date"]
+            streak = row["streak_days"]
+            from datetime import date, timedelta
+            last_date = date.fromisoformat(last) if last else None
+            today_date = date.fromisoformat(today)
+            if last_date == today_date:
+                return streak
+            elif last_date == today_date - timedelta(days=1):
+                streak += 1
+            else:
+                streak = 1
+            conn.execute(
+                "UPDATE user_streaks SET streak_days=?, last_date=?, chat_id=? WHERE user_id=?",
+                (streak, today, chat_id, user_id)
+            )
+            return streak
+
+    def get_streak(self, user_id: int) -> int:
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT streak_days FROM user_streaks WHERE user_id=?", (user_id,)
+            ).fetchone()
+            return row["streak_days"] if row else 0
+
+    # ── Пользователи ──────────────────────────────────────
+
+    def get_user_by_username(self, username: str) -> Optional[dict]:
+        with self._get_conn() as conn:
+            row = conn.execute(
+                """SELECT user_id, display_name, username FROM messages
+                   WHERE LOWER(username)=LOWER(?) ORDER BY id DESC LIMIT 1""",
+                (username,)
+            ).fetchone()
+            if row:
+                return dict(row)
+            row = conn.execute(
+                """SELECT user_id, display_name, username FROM moments
+                   WHERE LOWER(username)=LOWER(?) ORDER BY id DESC LIMIT 1""",
+                (username,)
+            ).fetchone()
+            return dict(row) if row else None
